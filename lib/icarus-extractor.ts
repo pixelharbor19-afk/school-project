@@ -551,10 +551,10 @@ export async function extractIcarus(
     );
   }
 
-  sortedDownloads = sortedDownloads.filter(
-    (d: any) =>
-      d?.url && !d.url.includes("bcdnxw.") && !d.url.includes("bcdnxw/"),
-  );
+  // sortedDownloads = sortedDownloads.filter(
+  //   (d: any) =>
+  //     d?.url && !d.url.includes("bcdnxw.") && !d.url.includes("bcdnxw/"),
+  // );
 
   if (!sortedDownloads.length) {
     return { success: false, error: "No valid download URLs", status: 404 };
