@@ -1,10 +1,10 @@
 import "dotenv/config";
 import express from "express";
-import { extractIcarus } from "../lib/icarus-extractor.ts";
+import { extractResshin } from "../lib/resshin-extractor.ts";
 
 const app = express();
 
-app.get("/icarus", async (req, res) => {
+app.get("/resshin", async (req, res) => {
   const { tmdbId, mediaType, title, date, season, episode, dubCode, dubType } =
     req.query;
 
@@ -17,7 +17,7 @@ app.get("/icarus", async (req, res) => {
   }
 
   try {
-    const result = await extractIcarus({
+    const result = await extractResshin({
       tmdbId: tmdbId as string,
       mediaType: mediaType as string,
       title: title as string,
@@ -25,7 +25,7 @@ app.get("/icarus", async (req, res) => {
       season: season as string | undefined,
       episode: episode as string | undefined,
       dubCode: dubCode as string | undefined,
-      dubType: dubType as string | undefined,
+      dubType: Number(dubType ?? "0"),
     });
 
     return res.status(result.success ? 200 : result.status).json(result);
@@ -40,9 +40,6 @@ app.get("/icarus", async (req, res) => {
   }
 });
 
-// app.listen(3000, () => {
-//   console.log("Listening on http://localhost:3000");
-// });
 const PORT = Number(process.env.PORT) || 3000;
 
 app.listen(PORT, () => {
