@@ -2,6 +2,7 @@
 import crypto from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 import { encryptUrl } from "./encryptor.ts";
+import { fetchWithTimeout } from "./fetch-timeout.ts";
 
 // ==================== CONFIG ====================
 const GATEWAY_SECRET = "76iRl07s0xSN9jqmEWAt79EBJZulIQIsV64FZr2O";
@@ -14,6 +15,79 @@ const supabase = createClient(
   process.env.SUPABASE_URL_MOVIEBOX_APP!,
   process.env.SUPABASE_SERVICE_ROLE_KEY_MOVIEBOX_APP!,
 );
+
+let blacklistCache: Set<string> | null = null;
+let blacklistCacheTime = 0;
+const BLACKLIST_TTL = 5 * 60_000;
+
+async function getNext8AMPH(): Promise<string> {
+  const now = new Date();
+  const ph = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Manila" }));
+  const next8AM = new Date(ph);
+  next8AM.setHours(8, 0, 0, 0);
+  if (ph >= next8AM) next8AM.setDate(next8AM.getDate() + 1);
+  const diff = next8AM.getTime() - ph.getTime();
+  return new Date(now.getTime() + diff).toISOString();
+}
+
+async function blacklistProxy(proxy: string) {
+  const expires_at = await getNext8AMPH();
+  await supabase
+    .from("proxy_blacklist")
+    .upsert(
+      { proxy, expires_at, hit_count: 1 },
+      { onConflict: "proxy", ignoreDuplicates: false },
+    );
+  blacklistCache?.add(proxy);
+  console.log(`[PROXY] ⛔ blacklisted ${proxy}`);
+}
+
+async function getActiveProxies(proxies: string[]): Promise<string[]> {
+  if (!blacklistCache || Date.now() - blacklistCacheTime > BLACKLIST_TTL) {
+    const { data } = await supabase
+      .from("proxy_blacklist")
+      .select("proxy")
+      .gt("expires_at", new Date().toISOString());
+    blacklistCache = new Set((data ?? []).map((r: any) => r.proxy));
+    blacklistCacheTime = Date.now();
+  }
+  return proxies.filter((p) => !blacklistCache!.has(p));
+}
+
+function shuffle<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+export const proxies = [
+  "https://proxy.zxcstream.xyz/proxy",
+  "https://fragrant-surf-698c.icarus030.workers.dev/",
+];
+
+export async function getWorkingProxy(proxies: string[]) {
+  const activeProxies = await getActiveProxies(proxies);
+  const shuffledProxies = shuffle(activeProxies);
+  if (!shuffledProxies.length) return null;
+
+  for (const proxy of shuffledProxies) {
+    try {
+      const res = await fetchWithTimeout(proxy, { method: "HEAD" }, 3000);
+      if (res.status === 429) {
+        await blacklistProxy(proxy);
+        continue;
+      }
+      if (res.status === 403) continue;
+      if (res.ok) return proxy;
+    } catch {
+      // network error / timeout → try next
+    }
+  }
+  return null;
+}
 
 let cachedServerJwt: string | null = null;
 let cachedServerJwtPromise: Promise<string> | null = null;
@@ -488,6 +562,7 @@ export async function extractResshin(
   else dlQuery.eq("episode", "");
 
   const { data: cachedDownloads } = await dlQuery.maybeSingle();
+
   if (cachedDownloads) {
     sortedDownloads = cachedDownloads.downloads ?? [];
   } else {
@@ -534,6 +609,15 @@ export async function extractResshin(
     }
   }
 
+  const workingProxy = await getWorkingProxy(proxies);
+  if (!workingProxy) {
+    return {
+      success: false,
+      error: "No working proxy available",
+      status: 502,
+    };
+  }
+
   if (!cachedDownloads) {
     await supabase.from("moviebox_downloads_cache").upsert(
       {
@@ -569,9 +653,7 @@ export async function extractResshin(
     )
       .filter(Boolean)
       .map(async (q: any) => {
-        const expiresAt = Date.now() + 5 * 60 * 60 * 1000;
-        const payload = `${expiresAt}|${q.url}`;
-        const encrypted = await encryptUrl(payload);
+        const encrypted = await encryptUrl(q.url);
         return {
           resolution: q.resolution,
           format: q.format,
@@ -579,7 +661,7 @@ export async function extractResshin(
           type: (q.url ?? "").includes(".m3u8")
             ? ("hls" as const)
             : ("mp4" as const),
-          link: `https://proxy.zxcstream.xyz/proxy?data=${encodeURIComponent(encrypted)}`,
+          link: `${workingProxy}?data=${encodeURIComponent(encrypted)}`,
         };
       }),
   );
