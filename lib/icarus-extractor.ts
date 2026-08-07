@@ -458,7 +458,7 @@ export async function extractIcarus(
         type: activeDubType,
         downloads: sortedDownloads,
         play_count: 0,
-        expires_at: new Date(Date.now() + 1000 * 60 * 60 * 45).toISOString(),
+        expires_at: new Date(Date.now() + 1000 * 60 * 60 * 35).toISOString(),
         refreshed_at: new Date().toISOString(),
       },
       {
