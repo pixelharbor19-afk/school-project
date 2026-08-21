@@ -195,7 +195,6 @@ export async function extractIcarus(
 
   const randomIP = getRandomAfricanIP();
   const baseUrl = `https://h5-api.aoneroom.com/wefeed-h5api-bff`;
-
   const headers = {
     "X-Client-Info": '{"timezone":"Africa/Nairobi"}',
     "Accept-Language": "en-US,en;q=0.5",
@@ -207,155 +206,149 @@ export async function extractIcarus(
     "X-Real-IP": randomIP,
   };
 
-  // -------- Search --------
+  // -------- Cache Lookup (dubs) --------
+  let dubs: any[];
+  let cached = false;
 
-  const searchRes = await fetchWithTimeout(
-    `${baseUrl}/subject/search`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        Referer: "https://h5.aoneroom.com/",
-        Origin: "https://h5.aoneroom.com",
+  const { data: cachedDubs } = await supabase
+    .from("moviebox_cache")
+    .select("dubs")
+    .eq("tmdb_id", tmdbId)
+    .eq("media_type", mediaType)
+    .maybeSingle();
+
+  if (cachedDubs) {
+    dubs = cachedDubs.dubs ?? [];
+    cached = true;
+  } else {
+    const searchRes = await fetchWithTimeout(
+      `${baseUrl}/subject/search`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          Referer: "https://h5.aoneroom.com/",
+          Origin: "https://h5.aoneroom.com",
+        },
+        body: JSON.stringify({
+          keyword: `${title}`,
+          page: 1,
+          perPage: 24,
+          subjectType: mediaType === "tv" ? 2 : 1,
+        }),
       },
-      body: JSON.stringify({
-        keyword: title,
-        page: 1,
-        perPage: 24,
-        subjectType: mediaType === "tv" ? 2 : 1,
-      }),
-    },
-    8000,
-  );
+      8000,
+    );
 
-  const searchJson = await searchRes.json();
-  const results = searchJson?.data?.data || searchJson?.data || searchJson;
-  const items = results?.items || [];
+    const searchJson = await searchRes.json();
+    const results = searchJson?.data?.data || searchJson?.data || searchJson;
+    const items = results?.items || [];
 
-  if (!items.length) {
-    return {
-      success: false,
-      error: "No search results",
-      status: 404,
-    };
-  }
-
-  const normalizedTitle = title.toLowerCase().trim().replace(/-/g, " ");
-
-  const LANG_TAGS =
-    /\[(tagalog|hindi|dubbed|multi|spanish|french|arabic|korean|japanese|tamil|telugu)\]/i;
-
-  const queryWords = normalizedTitle.split(/\s+/).filter(Boolean);
-  const dateObj = date ? new Date(date) : null;
-
-  const matchesItem = (item: any, skipLangTags: boolean) => {
-    const itemTitle = item.title?.toLowerCase().replace(/-/g, " ") || "";
-    const itemReleaseDate = item.releaseDate;
-
-    if (skipLangTags && LANG_TAGS.test(itemTitle)) return false;
-    if (!dateObj || !itemReleaseDate) return false;
-
-    const itemDate = new Date(itemReleaseDate);
-
-    const diff =
-      itemDate.getFullYear() * 12 +
-      itemDate.getMonth() -
-      (dateObj.getFullYear() * 12 + dateObj.getMonth());
-
-    if (Math.abs(diff) > 1) return false;
-
-    const itemTitleClean = itemTitle.replace(/\bs\d+(-s\d+)?\b/gi, "").trim();
-
-    const itemWordsClean = itemTitleClean.split(/\s+/).filter(Boolean);
-
-    if (queryWords.length <= 2 && itemWordsClean.length !== queryWords.length) {
-      return false;
+    if (!items.length) {
+      return { success: false, error: "No search results", status: 404 };
     }
 
-    return queryWords.every((word) => itemTitle.includes(word));
-  };
+    const normalizedTitle = title?.toLowerCase().trim().replace(/-/g, " ");
+    const LANG_TAGS =
+      /\[(tagalog|hindi|dubbed|multi|spanish|french|arabic|korean|japanese|tamil|telugu)\]/i;
+    const queryWords = normalizedTitle!.split(/\s+/).filter(Boolean);
+    const dateObj = date ? new Date(date) : null;
 
-  const selectedItem =
-    items.find((item: any) => matchesItem(item, true)) ??
-    items.find((item: any) => matchesItem(item, false));
-
-  if (!selectedItem) {
-    return {
-      success: false,
-      error: "Unavailable",
-      status: 404,
+    const matchesItem = (item: any, skipLangTags: boolean) => {
+      const itemTitle = item.title?.toLowerCase().replace(/-/g, " ") || "";
+      const itemReleaseDate = item.releaseDate;
+      if (skipLangTags && LANG_TAGS.test(itemTitle)) return false;
+      if (!dateObj || !itemReleaseDate) return false;
+      const itemDate = new Date(itemReleaseDate);
+      const diff =
+        itemDate.getFullYear() * 12 +
+        itemDate.getMonth() -
+        (dateObj.getFullYear() * 12 + dateObj.getMonth());
+      if (Math.abs(diff) > 1) return false;
+      const itemTitleClean = itemTitle.replace(/\bs\d+(-s\d+)?\b/gi, "").trim();
+      const itemWordsClean = itemTitleClean.split(/\s+/).filter(Boolean);
+      if (queryWords.length <= 2 && itemWordsClean.length !== queryWords.length)
+        return false;
+      return queryWords.every((word) => itemTitle.includes(word));
     };
-  }
 
-  const rawSubjectId = selectedItem?.subjectId;
+    let selectedItem =
+      items.find((item: any) => matchesItem(item, true)) ??
+      items.find((item: any) => matchesItem(item, false));
 
-  if (!rawSubjectId) {
-    return {
-      success: false,
-      error: "SubjectId Not Found",
-      status: 404,
-    };
-  }
+    if (!selectedItem) {
+      return { success: false, error: "Unavailable", status: 404 };
+    }
 
-  // -------- Get fresh dubs --------
+    const rawSubjectId = selectedItem?.subjectId;
+    if (!rawSubjectId) {
+      return { success: false, error: "SubjectId Not Found", status: 404 };
+    }
 
-  const detailRes = await fetchWithTimeout(
-    `${baseUrl}/detail?detailPath=${selectedItem.detailPath}`,
-    {
-      headers: {
-        ...headers,
-        Referer: `https://fmoviesunblocked.net/spa/videoPlayPage/movies/${selectedItem.detailPath}?id=${rawSubjectId}&type=/movie/detail`,
-        Origin: "https://fmoviesunblocked.net",
-      },
-    },
-    8000,
-  );
-
-  const detailJson = await detailRes.json();
-  const info = detailJson?.data?.data || detailJson?.data || detailJson;
-
-  let dubs = info?.subject?.dubs || [];
-
-  if (!dubs.length) {
-    dubs = [
+    const detailRes = await fetchWithTimeout(
+      `${baseUrl}/detail?detailPath=${selectedItem.detailPath}`,
       {
-        subjectId: rawSubjectId,
-        detailPath: selectedItem.detailPath,
-        original: true,
-        lanCode: "orig",
-        lanName: "Original Audio",
-        type: 0,
-        constructed: true,
+        headers: {
+          ...headers,
+          Referer: `https://fmoviesunblocked.net/spa/videoPlayPage/movies/${selectedItem.detailPath}?id=${rawSubjectId}&type=/movie/detail`,
+          Origin: "https://fmoviesunblocked.net",
+        },
       },
-    ];
+      8000,
+    );
+    const detailJson = await detailRes.json();
+    const info = detailJson?.data?.data || detailJson?.data || detailJson;
+
+    dubs = info?.subject?.dubs || [];
+
+    if (dubs.length === 0) {
+      dubs = [
+        {
+          subjectId: rawSubjectId,
+          detailPath: selectedItem.detailPath,
+          original: true,
+          lanCode: "orig",
+          lanName: "Original Audio",
+          type: 0,
+          constructed: true,
+        },
+      ];
+    }
+
+    if (dubs.length > 0) {
+      await supabase.from("moviebox_cache").upsert(
+        {
+          tmdb_id: tmdbId,
+          media_type: mediaType,
+          dubs,
+          release_date: date,
+          title,
+        },
+        { onConflict: "tmdb_id,media_type", ignoreDuplicates: true },
+      );
+    }
   }
 
-  // -------- Resolve active subject --------
-
+  // -------- Resolve active subjectId/detailPath from dubs --------
   const original =
     dubs.find((d: any) => d.original === true) ??
     dubs.find((d: any) => d.lanCode === "en") ??
     dubs[0];
 
   if (!original) {
-    return {
-      success: false,
-      error: "No original entry in dubs",
-      status: 404,
-    };
+    return { success: false, error: "No original entry in dubs", status: 404 };
   }
 
-  let subjectId = original.subjectId;
-  let detailPath = original.detailPath;
-  let activeDubType = original.type ?? 0;
-  let activeDubLang = original.lanCode ?? "orig";
+  let subjectId: string = original.subjectId;
+  let detailPath: string = original.detailPath;
+  let activeDubType: number = original.type ?? 0;
+  let activeDubLang: string = original.lanCode ?? "orig";
 
   if (dubCode) {
     const dubEntry = dubs.find(
       (d: any) => d.lanCode === dubCode && d.type === Number(dubType ?? "0"),
     );
-
     if (dubEntry) {
       subjectId = dubEntry.subjectId;
       detailPath = dubEntry.detailPath;
@@ -364,93 +357,93 @@ export async function extractIcarus(
     }
   }
 
-  // -------- Get fresh download URLs --------
-
+  // -------- Cache Lookup (downloads) --------
+  let sortedDownloads: any[];
   let subtitles: any[] = [];
+  let cachedDownloads = false;
 
-  const playUrl =
-    `https://movibox.net/wefeed-h5api-bff/subject/play` +
-    `?subjectId=${subjectId}` +
-    `&se=${mediaType === "tv" ? season : "0"}` +
-    `&ep=${mediaType === "tv" ? episode : "0"}` +
-    `&detailPath=${detailPath}` +
-    `&streamSignType=1`;
+  const dlQuery = supabase
+    .from("moviebox_downloads_cache")
+    .select("downloads")
+    .eq("tmdb_id", tmdbId)
+    .eq("media_type", mediaType)
+    .eq("dub", activeDubLang)
+    .eq("type", activeDubType)
+    .gt("expires_at", new Date().toISOString());
 
-  const playHeaders = {
-    ...headers,
-    Referer: `https://movibox.net/movies/${detailPath}?id=${subjectId}&type=/movie/detail&detailSe=&detailEp=&lang=en`,
-    Origin: "https://movibox.net",
-  };
+  if (season) dlQuery.eq("season", season);
+  else dlQuery.eq("season", "");
 
-  const sourcesRes = await fetchWithTimeout(
-    playUrl,
-    { headers: playHeaders },
-    8000,
-  );
+  if (episode) dlQuery.eq("episode", episode);
+  else dlQuery.eq("episode", "");
 
-  const sourcesJson = await sourcesRes.json();
-  let stream = sourcesJson.data?.streams || [];
+  const { data: cachedDl } = await dlQuery.maybeSingle();
+  if (cachedDl) {
+    sortedDownloads = cachedDl.downloads ?? [];
+    cachedDownloads = true;
+  } else {
+    const playUrl = `https://movibox.net/wefeed-h5api-bff/subject/play?subjectId=${subjectId}&se=${mediaType === "tv" ? season : "0"}&ep=${mediaType === "tv" ? episode : "0"}&detailPath=${detailPath}&streamSignType=1`;
+    const playHeaders = {
+      ...headers,
+      Referer: `https://movibox.net/movies/${detailPath}?id=${subjectId}&type=/movie/detail&detailSe=&detailEp=&lang=en`,
+      Origin: "https://movibox.net",
+    };
 
-  if (!stream.length && dubCode) {
-    subjectId = dubs[0].subjectId;
-    detailPath = dubs[0].detailPath;
-    activeDubLang = dubs[0].lanCode ?? "orig";
-    activeDubType = dubs[0].type ?? 0;
-
-    const retryUrl =
-      `https://movibox.net/wefeed-h5api-bff/subject/play` +
-      `?subjectId=${subjectId}` +
-      `&se=${mediaType === "tv" ? season : "0"}` +
-      `&ep=${mediaType === "tv" ? episode : "0"}` +
-      `&detailPath=${detailPath}` +
-      `&streamSignType=1`;
-
-    const retryRes = await fetchWithTimeout(
-      retryUrl,
-      {
-        headers: {
-          ...headers,
-          Referer: `https://movibox.net/movies/${detailPath}?id=${subjectId}&type=/movie/detail&detailSe=&detailEp=&lang=en`,
-          Origin: "https://movibox.net",
-        },
-      },
+    const sourcesRes = await fetchWithTimeout(
+      playUrl,
+      { headers: playHeaders },
       8000,
     );
 
-    const retryJson = await retryRes.json();
-    stream = retryJson.data?.streams || [];
+    const sourcesJson = await sourcesRes.json();
+    const stream = sourcesJson.data.streams || [];
 
-    subtitles = (retryJson.data?.captions || []).map((c: any) => ({
-      id: c.lan,
-      display: c.lanName,
-      file: c.url,
-    }));
+    if (!stream.length) {
+      if (!dubCode) {
+        return { success: false, error: "No download sources", status: 404 };
+      }
+
+      subjectId = dubs[0].subjectId;
+      detailPath = dubs[0].detailPath;
+      activeDubLang = dubs[0].lanCode ?? "orig";
+      activeDubType = dubs[0].type ?? 0;
+
+      const retryRes = await fetchWithTimeout(
+        playUrl,
+        {
+          headers: {
+            ...headers,
+            Referer: `https://movibox.net/movies/${detailPath}?id=${subjectId}&type=/movie/detail&detailSe=&detailEp=&lang=en`,
+            Origin: "https://movibox.net",
+          },
+        },
+        8000,
+      );
+
+      const retryJson = await retryRes.json();
+      const retrySources = retryJson.data.streams || [];
+      stream.push(...(retrySources || []));
+      subtitles = (retrySources?.captions || []).map((c: any) => ({
+        id: c.lan,
+        display: c.lanName,
+        file: c.url,
+      }));
+
+      if (!stream.length) {
+        return { success: false, error: "No download sources", status: 404 };
+      }
+    }
+
+    sortedDownloads = stream
+      .filter((d: any) => d?.url && typeof d.url === "string")
+      .sort((a: any, b: any) => (b.resolutions || 0) - (a.resolutions || 0));
+
+    if (!sortedDownloads.length) {
+      return { success: false, error: "No valid download URLs", status: 404 };
+    }
   }
-
-  if (!stream.length) {
-    return {
-      success: false,
-      error: "No download sources",
-      status: 404,
-    };
-  }
-
-  const sortedDownloads = stream
-    .filter((d: any) => d?.url && typeof d.url === "string")
-    .sort((a: any, b: any) => (b.resolutions || 0) - (a.resolutions || 0));
-
-  if (!sortedDownloads.length) {
-    return {
-      success: false,
-      error: "No valid download URLs",
-      status: 404,
-    };
-  }
-
-  // -------- Get working proxy --------
 
   const workingProxy = await getWorkingProxy(proxies);
-
   if (!workingProxy) {
     return {
       success: false,
@@ -459,12 +452,38 @@ export async function extractIcarus(
     };
   }
 
-  // -------- Generate fresh encrypted links --------
+  if (!cachedDownloads) {
+    await supabase.from("moviebox_downloads_cache").upsert(
+      {
+        tmdb_id: tmdbId,
+        media_type: mediaType,
+        season: season ?? "",
+        episode: episode ?? "",
+        dub: activeDubLang,
+        type: activeDubType,
+        downloads: sortedDownloads,
+        play_count: 0,
+        expires_at: new Date(Date.now() + 1000 * 60 * 60 * 35).toISOString(),
+        refreshed_at: new Date().toISOString(),
+      },
+      {
+        onConflict: "tmdb_id,media_type,season,episode,dub,type",
+      },
+    );
+  }
+
+  // sortedDownloads = sortedDownloads.filter(
+  //   (d: any) =>
+  //     d?.url && !d.url.includes("bcdnxw.") && !d.url.includes("bcdnxw/"),
+  // );
+
+  if (!sortedDownloads.length) {
+    return { success: false, error: "No valid download URLs", status: 404 };
+  }
 
   const links = await Promise.all(
     sortedDownloads.map(async (d: any) => {
       const encrypted = await encryptUrl(d.url);
-
       return {
         resolution: d.resolutions,
         format: d.format,
@@ -495,8 +514,8 @@ export async function extractIcarus(
           : d.lanName.replace(/\b(dub|audio|sub)\b/gi, "").trim(),
       original: d.original,
     })),
-    meow: false,
-    meowmeow: false,
+    meow: cached,
+    meowmeow: cachedDownloads,
     active: {
       langCode: activeDub?.lanCode ?? "",
       langType: activeDub?.type ?? 0,
